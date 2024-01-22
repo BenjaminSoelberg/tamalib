@@ -20,7 +20,7 @@
 #ifndef _HW_H_
 #define _HW_H_
 
-#include "hal.h"
+#include "tamalib_hal.h"
 
 #define LCD_WIDTH			32
 #define LCD_HEIGHT			16
@@ -45,7 +45,7 @@ void hw_release(void);
 void hw_set_lcd_pin(u8_t seg, u8_t com, u8_t val);
 void hw_set_button(button_t btn, btn_state_t state);
 
-void hw_set_buzzer_freq(u4_t freq);
+void hw_set_buzzer_period(u4_t period);
 void hw_enable_buzzer(bool_t en);
 
 #endif /* _HW_H_ */

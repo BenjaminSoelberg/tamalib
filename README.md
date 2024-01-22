@@ -1,5 +1,6 @@
 # TamaLIB - A hardware agnostic Tamagotchi P1 emulation library
 
+## PLEASE NOTE: THIS FORK HAS BEEN CHANGED AND OPTIMIZED FOR G&W RETRO-GO.
 
 ## Synopsis
 

@@ -20,7 +20,8 @@
 #ifndef _CPU_H_
 #define _CPU_H_
 
-#include "hal.h"
+#include <sys/select.h>
+#include "tamalib_hal.h"
 
 #define MEMORY_SIZE				4096 // 4096 x 4 bits (640 x 4 bits of RAM)
 
@@ -36,7 +37,7 @@
 /* Define this if you want to reduce the footprint of the memory buffer from 4096 u4_t (most likely bytes)
  * to 464 u8_t (bytes for sure), while increasing slightly the number of operations needed to read/write from/to it.
  */
-#define LOW_FOOTPRINT
+//#define LOW_FOOTPRINT
 
 #ifdef LOW_FOOTPRINT
 /* Invalid memory areas are not buffered to reduce the footprint of the library in memory */
@@ -103,11 +104,6 @@
 #define MEM_BUFFER_TYPE				u4_t
 #endif
 
-typedef struct breakpoint {
-	u13_t addr;
-	struct breakpoint *next;
-} breakpoint_t;
-
 /* Pins (TODO: add other pins) */
 typedef enum {
 	PIN_K00 = 0x0,
@@ -152,14 +148,15 @@ typedef struct {
 	u8_t *sp;
 	u4_t *flags;
 
-	u32_t *tick_counter;
-	u32_t *clk_timer_timestamp;
-	u32_t *prog_timer_timestamp;
+	u64_t *tick_counter;
+	u64_t *clk_timer_timestamp;
+	u64_t *prog_timer_timestamp;
 	bool_t *prog_timer_enabled;
 	u8_t *prog_timer_data;
 	u8_t *prog_timer_rld;
 
 	u32_t *call_depth;
+    uint64_t *save_time;
 
 	interrupt_t *interrupts;
 
@@ -167,26 +164,20 @@ typedef struct {
 } state_t;
 
 
-void cpu_add_bp(breakpoint_t **list, u13_t addr);
-void cpu_free_bp(breakpoint_t **list);
-
-void cpu_set_speed(u8_t speed);
-
 state_t * cpu_get_state(void);
 
 u32_t cpu_get_depth(void);
 
 void cpu_set_input_pin(pin_t pin, pin_state_t state);
 
-void cpu_sync_ref_timestamp(void);
-
 void cpu_refresh_hw(void);
 
 void cpu_reset(void);
 
-bool_t cpu_init(const u12_t *program, breakpoint_t *breakpoints, u32_t freq);
-void cpu_release(void);
+bool_t cpu_init(const u12_t *program, u32_t freq);
 
 int cpu_step(void);
+
+void cpu_set_silent(bool_t s);
 
 #endif /* _CPU_H_ */

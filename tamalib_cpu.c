@@ -17,9 +17,10 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  */
-#include "cpu.h"
-#include "hw.h"
-#include "hal.h"
+#include "tamalib_cpu.h"
+#include "tamalib_hw.h"
+#include "tamalib_hal.h"
+#include <string.h>
 
 #define TICK_FREQUENCY				32768 // Hz
 
@@ -147,20 +148,18 @@ static interrupt_t interrupts[INT_SLOT_NUM] = {
 	{0x0, 0x0, 0, 0x02}, // Clock timer
 };
 
-static breakpoint_t *g_breakpoints = NULL;
-
 static u32_t call_depth = 0;
+static uint64_t save_time = 0;
 
-static u32_t clk_timer_timestamp = 0; // in ticks
-static u32_t prog_timer_timestamp = 0; // in ticks
+static u64_t clk_timer_timestamp = 0; // in ticks
+static u64_t prog_timer_timestamp = 0; // in ticks
 static bool_t prog_timer_enabled = 0;
 static u8_t prog_timer_data = 0;
 static u8_t prog_timer_rld = 0;
 
-static u32_t tick_counter = 0;
+static u64_t tick_counter = 0;
 static u32_t ts_freq;
-static u8_t speed_ratio = 1;
-static timestamp_t ref_ts;
+static bool_t silent = 0;
 
 static state_t cpu_state = {
 	.pc = &pc,
@@ -180,52 +179,15 @@ static state_t cpu_state = {
 	.prog_timer_rld = &prog_timer_rld,
 
 	.call_depth = &call_depth,
+    .save_time = &save_time,
 
 	.interrupts = interrupts,
 
 	.memory = memory,
 };
 
-
-void cpu_add_bp(breakpoint_t **list, u13_t addr)
-{
-	breakpoint_t *bp;
-
-	bp = (breakpoint_t *) g_hal->malloc(sizeof(breakpoint_t));
-	if (!bp) {
-		g_hal->log(LOG_ERROR, "Cannot allocate memory for breakpoint 0x%04X!\n", addr);
-		return;
-	}
-
-	bp->addr = addr;
-
-	if (*list != NULL) {
-		bp->next = *list;
-	} else {
-		/* List is empty */
-		bp->next = NULL;
-	}
-
-	*list = bp;
-}
-
-void cpu_free_bp(breakpoint_t **list)
-{
-	breakpoint_t *bp = *list, *tmp;
-
-	while (bp != NULL) {
-		tmp = bp->next;
-		g_hal->free(bp);
-		bp = tmp;
-	}
-
-	*list = NULL;
-}
-
-void cpu_set_speed(u8_t speed)
-{
-	speed_ratio = speed;
-}
+#define EMPTY_OPS 0xff
+static u8_t ops_cache[4096] __attribute__((aligned(4))); // 12 bit instruction decoding cache
 
 state_t * cpu_get_state(void)
 {
@@ -250,6 +212,11 @@ static void generate_interrupt(int_slot_t slot, u8_t bit)
 
 void cpu_set_input_pin(pin_t pin, pin_state_t state)
 {
+    // Ignore button presses while in silent mode.
+    if (silent) {
+        return;
+    }
+
 	/* Set the I/O */
 	inputs[pin & 0x4].states = (inputs[pin & 0x4].states & ~(0x1 << (pin & 0x3))) | (state << (pin & 0x3));
 
@@ -265,11 +232,6 @@ void cpu_set_input_pin(pin_t pin, pin_state_t state)
 				break;
 		}
 	}
-}
-
-void cpu_sync_ref_timestamp(void)
-{
-	ref_ts = g_hal->get_timestamp();
 }
 
 static u4_t get_io(u12_t n)
@@ -406,7 +368,8 @@ static u4_t get_io(u12_t n)
 			break;
 
 		default:
-			g_hal->log(LOG_ERROR,   "Read from unimplemented I/O 0x%03X - PC = 0x%04X\n", n, pc);
+			//g_hal->log(LOG_ERROR,   "Read from unimplemented I/O 0x%03X - PC = 0x%04X\n", n, pc);
+			break;
 	}
 
 	return 0;
@@ -469,7 +432,9 @@ static void set_io(u12_t n, u4_t v)
 		case REG_K40_K43_BZ_OUTPUT_PORT:
 			/* Output port (R40-R43) */
 			//g_hal->log(LOG_INFO, "Output/Buzzer: 0x%X\n", v);
-			hw_enable_buzzer(!(v & 0x8));
+            if (!silent) {
+                hw_enable_buzzer(!(v & 0x8));
+            }
 			break;
 
 		case REG_CPU_OSC3_CTRL:
@@ -493,7 +458,9 @@ static void set_io(u12_t n, u4_t v)
 
 		case REG_BUZZER_CTRL1:
 			/* Buzzer config 1 */
-			hw_set_buzzer_freq(v & 0x7);
+            if (!silent) {
+                hw_set_buzzer_period(v & 0x7);
+            }
 			break;
 
 		case REG_BUZZER_CTRL2:
@@ -528,7 +495,8 @@ static void set_io(u12_t n, u4_t v)
 			break;
 
 		default:
-			g_hal->log(LOG_ERROR,   "Write 0x%X to unimplemented I/O 0x%03X - PC = 0x%04X\n", v, n, pc);
+			//g_hal->log(LOG_ERROR,   "Write 0x%X to unimplemented I/O 0x%03X - PC = 0x%04X\n", v, n, pc);
+            break;
 	}
 }
 
@@ -551,26 +519,26 @@ static u4_t get_memory(u12_t n)
 
 	if (n < MEM_RAM_SIZE) {
 		/* RAM */
-		g_hal->log(LOG_MEMORY, "RAM              - ");
+		//g_hal->log(LOG_MEMORY, "RAM              - ");
 		res = GET_RAM_MEMORY(memory, n);
 	} else if (n >= MEM_DISPLAY1_ADDR && n < (MEM_DISPLAY1_ADDR + MEM_DISPLAY1_SIZE)) {
 		/* Display Memory 1 */
-		g_hal->log(LOG_MEMORY, "Display Memory 1 - ");
+		//g_hal->log(LOG_MEMORY, "Display Memory 1 - ");
 		res = GET_DISP1_MEMORY(memory, n);
 	} else if (n >= MEM_DISPLAY2_ADDR && n < (MEM_DISPLAY2_ADDR + MEM_DISPLAY2_SIZE)) {
 		/* Display Memory 2 */
-		g_hal->log(LOG_MEMORY, "Display Memory 2 - ");
+		//g_hal->log(LOG_MEMORY, "Display Memory 2 - ");
 		res = GET_DISP2_MEMORY(memory, n);
 	} else if (n >= MEM_IO_ADDR && n < (MEM_IO_ADDR + MEM_IO_SIZE)) {
 		/* I/O Memory */
-		g_hal->log(LOG_MEMORY, "I/O              - ");
+		//g_hal->log(LOG_MEMORY, "I/O              - ");
 		res = get_io(n);
 	} else {
-		g_hal->log(LOG_ERROR,   "Read from invalid memory address 0x%03X - PC = 0x%04X\n", n, pc);
+		//g_hal->log(LOG_ERROR,   "Read from invalid memory address 0x%03X - PC = 0x%04X\n", n, pc);
 		return 0;
 	}
 
-	g_hal->log(LOG_MEMORY, "Read  0x%X - Address 0x%03X - PC = 0x%04X\n", res, n, pc);
+	//g_hal->log(LOG_MEMORY, "Read  0x%X - Address 0x%03X - PC = 0x%04X\n", res, n, pc);
 
 	return res;
 }
@@ -581,28 +549,32 @@ static void set_memory(u12_t n, u4_t v)
 	if (n < MEM_RAM_SIZE) {
 		/* RAM */
 		SET_RAM_MEMORY(memory, n, v);
-		g_hal->log(LOG_MEMORY, "RAM              - ");
+		//g_hal->log(LOG_MEMORY, "RAM              - ");
 	} else if (n >= MEM_DISPLAY1_ADDR && n < (MEM_DISPLAY1_ADDR + MEM_DISPLAY1_SIZE)) {
 		/* Display Memory 1 */
 		SET_DISP1_MEMORY(memory, n, v);
-		set_lcd(n, v);
-		g_hal->log(LOG_MEMORY, "Display Memory 1 - ");
+        if (!silent) {
+            set_lcd(n, v);
+        }
+		//g_hal->log(LOG_MEMORY, "Display Memory 1 - ");
 	} else if (n >= MEM_DISPLAY2_ADDR && n < (MEM_DISPLAY2_ADDR + MEM_DISPLAY2_SIZE)) {
 		/* Display Memory 2 */
 		SET_DISP2_MEMORY(memory, n, v);
-		set_lcd(n, v);
-		g_hal->log(LOG_MEMORY, "Display Memory 2 - ");
+        if (!silent) {
+            set_lcd(n, v);
+        }
+		//g_hal->log(LOG_MEMORY, "Display Memory 2 - ");
 	} else if (n >= MEM_IO_ADDR && n < (MEM_IO_ADDR + MEM_IO_SIZE)) {
 		/* I/O Memory */
 		SET_IO_MEMORY(memory, n, v);
 		set_io(n, v);
-		g_hal->log(LOG_MEMORY, "I/O              - ");
+		//g_hal->log(LOG_MEMORY, "I/O              - ");
 	} else {
-		g_hal->log(LOG_ERROR,   "Write 0x%X to invalid memory address 0x%03X - PC = 0x%04X\n", v, n, pc);
+		//g_hal->log(LOG_ERROR,   "Write 0x%X to invalid memory address 0x%03X - PC = 0x%04X\n", v, n, pc);
 		return;
 	}
 
-	g_hal->log(LOG_MEMORY, "Write 0x%X - Address 0x%03X - PC = 0x%04X\n", v, n, pc);
+	//g_hal->log(LOG_MEMORY, "Write 0x%X - Address 0x%03X - PC = 0x%04X\n", v, n, pc);
 }
 
 void cpu_refresh_hw(void)
@@ -1583,20 +1555,8 @@ static const op_t ops[] = {
 	{NULL, 0, 0, 0, 0, 0, NULL},
 };
 
-static timestamp_t wait_for_cycles(timestamp_t since, u8_t cycles) {
-	timestamp_t deadline;
-
+static inline void wait_for_cycles(u8_t cycles) {
 	tick_counter += cycles;
-
-	if (speed_ratio == 0) {
-		/* Emulation will be as fast as possible */
-		return g_hal->get_timestamp();
-	}
-
-	deadline = since + (cycles * ts_freq)/(TICK_FREQUENCY * speed_ratio);
-	g_hal->sleep_until(deadline);
-
-	return deadline;
 }
 
 static void process_interrupts(void)
@@ -1616,12 +1576,12 @@ static void process_interrupts(void)
 			pc = TO_PC(PCB, 1, interrupts[i].vector);
 			call_depth++;
 
-			ref_ts = wait_for_cycles(ref_ts, 12);
+			wait_for_cycles(12);
 			interrupts[i].triggered = 0;
 		}
 	}
 }
-
+/*
 static void print_state(u8_t op_num, u12_t op, u13_t addr)
 {
 	u8_t i;
@@ -1630,33 +1590,33 @@ static void print_state(u8_t op_num, u12_t op, u13_t addr)
 		return;
 	}
 
-	g_hal->log(LOG_CPU, "0x%04X: ", addr);
+	//g_hal->log(LOG_CPU, "0x%04X: ", addr);
 
 	for (i = 0; i < call_depth; i++) {
-		g_hal->log(LOG_CPU, "  ");
+		//g_hal->log(LOG_CPU, "  ");
 	}
 
 	if (ops[op_num].mask_arg0 != 0) {
-		/* Two arguments */
-		g_hal->log(LOG_CPU, ops[op_num].log, (op & ops[op_num].mask_arg0) >> ops[op_num].shift_arg0, op & ~(ops[op_num].mask | ops[op_num].mask_arg0));
+		// Two arguments
+		//g_hal->log(LOG_CPU, ops[op_num].log, (op & ops[op_num].mask_arg0) >> ops[op_num].shift_arg0, op & ~(ops[op_num].mask | ops[op_num].mask_arg0));
 	} else {
-		/* One argument */
-		g_hal->log(LOG_CPU, ops[op_num].log, (op & ~ops[op_num].mask) >> ops[op_num].shift_arg0);
+		// One argument
+		//g_hal->log(LOG_CPU, ops[op_num].log, (op & ~ops[op_num].mask) >> ops[op_num].shift_arg0);
 	}
 
 	if (call_depth < 10) {
 		for (i = 0; i < (10 - call_depth); i++) {
-			g_hal->log(LOG_CPU, "  ");
+			//g_hal->log(LOG_CPU, "  ");
 		}
 	}
 
-	g_hal->log(LOG_CPU, " ; 0x%03X - ", op);
+	//g_hal->log(LOG_CPU, " ; 0x%03X - ", op);
 	for (i = 0; i < 12; i++) {
-		g_hal->log(LOG_CPU, "%s", ((op >> (11 - i)) & 0x1) ? "1" : "0");
+		//g_hal->log(LOG_CPU, "%s", ((op >> (11 - i)) & 0x1) ? "1" : "0");
 	}
-	g_hal->log(LOG_CPU, " - PC = 0x%04X, SP = 0x%02X, NP = 0x%02X, X = 0x%03X, Y = 0x%03X, A = 0x%X, B = 0x%X, F = 0x%X\n", pc, sp, np, x, y, a, b, flags);
+	//g_hal->log(LOG_CPU, " - PC = 0x%04X, SP = 0x%02X, NP = 0x%02X, X = 0x%03X, Y = 0x%03X, A = 0x%X, B = 0x%X, F = 0x%X\n", pc, sp, np, x, y, a, b, flags);
 }
-
+*/
 void cpu_reset(void)
 {
 	u13_t i;
@@ -1670,7 +1630,7 @@ void cpu_reset(void)
 	y = 0; // undef
 	sp = 0; // undef
 	flags = 0;
-
+    save_time = 0;
 	/* Init RAM to zeros */
 	for (i = 0; i < MEM_BUFFER_SIZE; i++) {
 		memory[i] = 0;
@@ -1680,13 +1640,12 @@ void cpu_reset(void)
 	SET_IO_MEMORY(memory, REG_LCD_CTRL, 0x8); // LCD control
 	/* TODO: Input relation register */
 
-	cpu_sync_ref_timestamp();
+    memset(ops_cache, EMPTY_OPS, sizeof(ops_cache)); // Seed the cache with empty instructions indexes
 }
 
-bool_t cpu_init(const u12_t *program, breakpoint_t *breakpoints, u32_t freq)
+bool_t cpu_init(const u12_t *program, u32_t freq)
 {
 	g_program = program;
-	g_breakpoints = breakpoints;
 	ts_freq = freq;
 
 	cpu_reset();
@@ -1694,56 +1653,59 @@ bool_t cpu_init(const u12_t *program, breakpoint_t *breakpoints, u32_t freq)
 	return 0;
 }
 
-void cpu_release(void)
-{
+void cpu_set_silent(bool_t s) {
+    silent = s;
 }
 
 int cpu_step(void)
 {
 	u12_t op;
-	u8_t i;
-	breakpoint_t *bp = g_breakpoints;
 	static u8_t previous_cycles = 0;
 
 	op = g_program[pc];
 
-	/* Lookup the OP code */
-	for (i = 0; ops[i].log != NULL; i++) {
-		if ((op & ops[i].mask) == ops[i].code) {
-			break;
-		}
-	}
+    u8_t i = ops_cache[op];
+    if (i == EMPTY_OPS) {
+        /* Lookup the OP code */
+        for (i = 0; ops[i].log != NULL; i++) {
+            if ((op & ops[i].mask) == ops[i].code) {
+                break;
+            }
+        }
+        /* Cach the ops index */
+        ops_cache[op] = i;
+        // printf("ops index %d with op %04X has been cached\n", i, op);
+    }
 
-	if (ops[i].log == NULL) {
-		g_hal->log(LOG_ERROR, "Unknown op-code 0x%X (pc = 0x%04X)\n", op, pc);
+    op_t current_ops = ops[i];
+	if (current_ops.log == NULL) {
+		//g_hal->log(LOG_ERROR, "Unknown op-code 0x%X (pc = 0x%04X)\n", op, pc);
 		return 1;
 	}
 
 	next_pc = (pc + 1) & 0x1FFF;
 
 	/* Display the operation along with the current state of the processor */
-	print_state(i, op, pc);
+	//print_state(i, op, pc);
 
 	/* Match the speed of the real processor
 	 * NOTE: For better accuracy, the final wait should happen here, however
 	 * the downside is that all interrupts will likely be delayed by one OP
 	 */
-	ref_ts = wait_for_cycles(ref_ts, previous_cycles);
+	wait_for_cycles(previous_cycles);
 
 	/* Process the OP code */
-	if (ops[i].cb != NULL) {
-		if (ops[i].mask_arg0 != 0) {
-			/* Two arguments */
-			ops[i].cb((op & ops[i].mask_arg0) >> ops[i].shift_arg0, op & ~(ops[i].mask | ops[i].mask_arg0));
-		} else {
-			/* One arguments */
-			ops[i].cb((op & ~ops[i].mask) >> ops[i].shift_arg0, 0);
-		}
-	}
+    if (current_ops.mask_arg0 != 0) {
+        /* Two arguments */
+        current_ops.cb((op & current_ops.mask_arg0) >> current_ops.shift_arg0, op & ~(current_ops.mask | current_ops.mask_arg0));
+    } else {
+        /* One arguments */
+        current_ops.cb((op & ~current_ops.mask) >> current_ops.shift_arg0, 0);
+    }
 
 	/* Prepare for the next instruction */
 	pc = next_pc;
-	previous_cycles = ops[i].cycles;
+	previous_cycles = current_ops.cycles;
 
 	if (i > 0) {
 		/* OP code is not PSET, reset NP */
@@ -1774,15 +1736,6 @@ int cpu_step(void)
 	/* Check if there is any pending interrupt */
 	if (I && i > 0) { // Do not process interrupts after a PSET operation
 		process_interrupts();
-	}
-
-	/* Check if we could pause the execution */
-	while (bp != NULL) {
-		if (bp->addr == pc) {
-			return 1;
-		}
-
-		bp = bp->next;
 	}
 
 	return 0;
