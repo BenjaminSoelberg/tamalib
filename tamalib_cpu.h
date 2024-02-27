@@ -172,7 +172,7 @@ void cpu_set_input_pin(pin_t pin, pin_state_t state);
 
 void cpu_refresh_hw(void);
 
-void cpu_reset(void);
+void tama_cpu_reset(void);
 
 bool_t cpu_init(const u12_t *program, u32_t freq);
 
