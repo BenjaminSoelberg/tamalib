@@ -1643,7 +1643,7 @@ void tama_cpu_reset(void)
     memset(ops_cache, EMPTY_OPS, sizeof(ops_cache)); // Seed the cache with empty instructions indexes
 }
 
-bool_t cpu_init(const u12_t *program, u32_t freq)
+bool_t tama_cpu_init(const u12_t *program, u32_t freq)
 {
 	g_program = program;
 	ts_freq = freq;

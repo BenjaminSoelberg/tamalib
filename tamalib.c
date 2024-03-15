@@ -24,7 +24,7 @@ hal_t *g_hal;
 bool_t tamalib_init(const u12_t *program, u32_t freq) {
     bool_t res = 0;
 
-    res |= cpu_init(program, freq);
+    res |= tama_cpu_init(program, freq);
     res |= hw_init();
     cpu_set_silent(0);
 
