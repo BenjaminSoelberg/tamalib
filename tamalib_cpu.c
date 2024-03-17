@@ -513,7 +513,7 @@ static void set_lcd(u12_t n, u4_t v)
 	}
 }
 
-static u4_t get_memory(u12_t n)
+u4_t get_memory(u12_t n)
 {
 	u4_t res = 0;
 
