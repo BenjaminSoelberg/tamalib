@@ -181,5 +181,6 @@ int cpu_step(void);
 void cpu_set_silent(bool_t s);
 
 u4_t get_memory(u12_t n);
+void set_memory(u12_t n, u4_t v);
 
 #endif /* _CPU_H_ */

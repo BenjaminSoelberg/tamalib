@@ -543,7 +543,7 @@ u4_t get_memory(u12_t n)
 	return res;
 }
 
-static void set_memory(u12_t n, u4_t v)
+void set_memory(u12_t n, u4_t v)
 {
 	/* Cache any data written to a valid address, and process it */
 	if (n < MEM_RAM_SIZE) {
